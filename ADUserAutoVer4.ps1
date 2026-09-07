@@ -2,8 +2,10 @@
 
 #Configuration
 $Domain = "EastCharmer.local"
-$CSVPath = "C:\users.csv"
-$LogFile = "C:\CreationLogs.txt"
+$CSVPath = "C:\AD Automation Project\users.csv"
+$LogFile = "C:\AD Automation Project\CreationLogs.txt"
+
+
 
 #Department Configuration
 
@@ -62,34 +64,44 @@ function Write-Log {
 function Test-MandatoryFields
 {
 
+    
     param(
     
-        [string]$FirstName,
-        [string]$Lastname,
-        [string]$SamAccountName,
-        [string]$Department,
-        [string]$Password
-
+        $User
 
     )
 
-    if(
-        [string]::IsNullOrWhiteSpace($FirstName)-or
-        [string]::IsNullOrWhiteSpace($Lastname)-or
-        [string]::IsNullOrWhiteSpace($SamAccountName)-or
-        [string]::IsNullOrWhiteSpace($Department)-or
-        [string]::IsNullOrWhiteSpace($Password)
+    $RequiredFields = @(
+    
+        "FirstName"
+        "LastName"
+        "SamAccountName"
+        "Department"
+        "Title"
+        "EmployeeID"
+        "Office"
+        "Manager"
 
     )
+
+    $MissingFields = @()
+
+    foreach ($Field in $RequiredFields)
     {
+    
+        if ([string]::IsNullOrWhiteSpace($User.$Field))
+        {
+        
+            $MissingFields += $Field
 
-        return $false
+        }
 
     }
+    
+    return $MissingFields
+}
 
-    return $true
-
-}#Function to verify Department
+#Function to verify Department
 function Test-Department
 {
 
@@ -117,16 +129,72 @@ function Test-ExistingUser
 
     param(
     
-        [string]$SamAccountName
+        [string]$SamAccountName,
+        [string]$UserPrincipalName,
+        [string]$EmployeeID
 
     )
 
     $User = Get-ADUser `
-        -Filter "SamAccountName -eq '$SamAccountName'" `
+        -Filter "SamAccountName -eq '$SamAccountName' -or UserPrincipalName -eq '$UserPrincipalName' -or EmployeeID -eq '$EmployeeID'" `
+        -Properties UserPrincipalName, EmployeeID `
         -ErrorAction SilentlyContinue
 
+    if(-not $User)
+    {
+    
+        return $null
 
-    return $User
+    }
+
+    foreach($us in $User)
+    {
+    
+        if($us.SamAccountName -eq $SamAccountName)
+        {
+        
+            return [PSCustomObject]@{
+            
+                ConflictType = "SamAccountName"
+                ConflictValue = $SamAccountName
+                ExistingUser = $us
+
+            }
+
+        }
+
+        if($us.UserPrincipalName -eq $UserPrincipalName)
+        {
+        
+            return [PSCustomObject]@{
+            
+                ConflictType = "UserPrincipalName"
+                ConflictValue = $UserPrincipalName
+                ExistingUser = $us
+
+
+            }
+
+        }
+
+        if($us.EmployeeID -eq $EmployeeID)
+        {
+        
+            return [PSCustomObject]@{
+            
+                ConflictType = "EmployeeID"
+                ConflictValue = $EmployeeID
+                ExistingUser = $us
+
+            }
+
+        }
+
+    }
+       
+
+
+    return $null
 
 }
 
@@ -140,18 +208,26 @@ function Test-manager
 
     )
 
-    if([string]::IsNullOrWhiteSpace($Manager))
-    {
-    
-        return $null
+    $Manager = $Manager.Trim()
 
+    try {
+        $ManagerObject = Get-ADUser `
+            -Identity $Manager `
+            -ErrorAction Stop
+
+        return [PSCustomObject]@{
+            IsValid = $true
+            Manager = $Manager
+            User = $ManagerObject
+        }
     }
-
-    $ManagerObject = Get-ADUser `
-        -Identity $Manager `
-        -ErrorAction SilentlyContinue
-
-    return $ManagerObject
+    catch {
+        return [PSCustomObject]@{
+            IsValid = $false
+            Manager = $Manager
+            User = $null
+        }
+    }
 
 }
 
@@ -207,6 +283,8 @@ function Add-UserToGroup
 
     )
 
+    
+
     $ADGroup = Get-ADGroup `
         -Identity $Group `
         -ErrorAction SilentlyContinue
@@ -222,9 +300,10 @@ function Add-UserToGroup
         Write-Host "Added to Group : $Group" -ForegroundColor Green
 
         Write-Log `
-            -Message "$SamAccountName added to Group $Group" `
+            -Message "$SamAccountName - Group Assignment - Successful : $Group" `
             -Status "SUCCESS"
             
+        return $true
     }
     else
     {
@@ -232,8 +311,10 @@ function Add-UserToGroup
         Write-Host "Group '$Group' not found." -ForegroundColor Yellow
 
         Write-Log `
-            -Message "$Group not found." `
+            -Message "$SamAccountName - Group Assignment - Warning : $Group not found" `
             -Status "WARNING"
+
+        return $false
 
     }
 
@@ -311,6 +392,8 @@ function Set-UserManager
 
     )
 
+    
+
     if($ManagerObject)
     {
     
@@ -319,6 +402,7 @@ function Set-UserManager
             -Manager $ManagerObject.DistinguishedName `
             -ErrorAction Stop
 
+        
     }
 
 }
@@ -333,6 +417,8 @@ function Test-CreatedUser
         [string]$SamAccountName
 
     )
+
+    
 
     $CreatedUser = Get-ADUser `
         -Identity $SamAccountName `
@@ -358,6 +444,7 @@ $Users = Import-Csv $CSVPath
 $CreatedCount = 0
 $FailedCount = 0
 $SkippedCount = 0
+$PartialCount = 0
 
 #Processing Each User
 
@@ -366,7 +453,8 @@ foreach ($User in $Users)
     #Setting Manager Value to null
     $ManagerObject = $null
 
-    
+    #Intilaizing Result
+    $ProvisioningResult = "COMPLETED"
     
 
     Write-Host ""
@@ -380,38 +468,36 @@ foreach ($User in $Users)
     $SamAccountName = $User.SamAccountName
     $Department     = $User.Department
     $Title          = $User.Title
-    $Password       = $User.Password
     $EmployeeID     = $User.EmployeeID
     $Office         = $User.Office
     $Manager        = $User.Manager
 
     #Validate Mandatory Fields
+    $MissingField = Test-MandatoryFields -User $User
 
-    if(
-    
-        -not (Test-MandatoryFields `
-            -FirstName $FirstName `
-            -Lastname $LastName `
-            -SamAccountName $SamAccountName `
-            -Department $Department `
-            -Password $Password)
-
-    )
+    if($MissingField.Count -gt 0)
     {
     
-        Write-Host "Mandatory Fields are Missing." -ForegroundColor Red
+        Write-Host "Mandatory Fields are Missing" -ForegroundColor Red
 
         Write-Log `
-            -Message "$SamAccountName -Missing Mandatory Fields" `
-            -Status "FAILED"
+            -Message "'$SamAccountName' -Missing Mandatory Fields : $($MissingField -join ', ')" `
+            -Status "WARNING"
 
         $SkippedCount++
+
+        Write-Log `
+            -Message "$SamAccountName - Overall Provisioning Result: SKIPPED" `
+            -Status "WARNING"
 
         continue
     
     }
 
+    
+
     #Validate Department
+    $Department = $Department.Trim()
     $DepartmentInfo = Test-Department `
         -Department $Department `
         -DepartmentConfig $DepartmentConfig
@@ -422,10 +508,15 @@ foreach ($User in $Users)
         Write-Host "Department '$Department' is not configured." -ForegroundColor Red
 
         Write-Log `
-            -Message "$SamAccountName - Invalid Department" `
-            -Status "FAILED"
+            -Message "$SamAccountName - Invalid Department : $Department" `
+            -Status "WARNING"
 
         $SkippedCount++
+
+        Write-Log `
+            -Message "$SamAccountName - Overall Provisioning Result: SKIPPED" `
+            -Status "WARNING"
+
 
         continue
             
@@ -436,64 +527,86 @@ foreach ($User in $Users)
     $OU = $DepartmentInfo.OU
     $Group = $DepartmentInfo.Group
 
+    #Generate Values
+    $DisplayName = "$FirstName $LastName"
+    $UserPrincipalName = "$SamAccountName@$Domain"
+    $EmailAddress = "$SamAccountName@$Domain"
+
     
     #Check if user already exist
     $ExistingUser = Test-ExistingUser `
-        -SamAccountName $SamAccountName
+        -SamAccountName $SamAccountName `
+        -UserPrincipalName $UserPrincipalName `
+        -EmployeeID $EmployeeID
 
     if($ExistingUser)
     {
-    
-        Write-Host "$SamAccountName already exists." -ForegroundColor Yellow
+        Write-Host `
+            "$($ExistingUser.ConflictType) $($ExistingUser.ConflictValue) already exists." `
+            -ForegroundColor Yellow
 
         Write-Log `
-            -Message "$SamAccountName already exist" `
-            -Status "FAILED"
+            -Message "$SamAccountName - $($ExistingUser.ConflictType) $($ExistingUser.ConflictValue) already exists" `
+            -Status "WARNING"
 
         $SkippedCount++
+
+        Write-Log `
+            -Message "$SamAccountName - Overall Provisioning Result: SKIPPED" `
+            -Status "WARNING"
+
 
         continue
 
     }
 
     #Convert Password to secure
-
-    $SecurePassword = ConvertTo-SecureString `
-        $Password `
-        -AsPlainText `
-        -Force
+   
+    #$SecurePassword = ConvertTo-SecureString `
+       # $Password `
+        #-AsPlainText `
+        #-Force
+   
     
 
-    #Generate Values
-    $DisplayName = "$FirstName $LastName"
-    $UserPrincipalName = "$SamAccountName@$Domain"
-    $EmailAddress = "$SamAccountName@$Domain"
+
 
     #Verify the manager exist.
 
-    $ManagerObject = Test-manager `
+    $ManagerResult = Test-manager `
         -Manager $Manager
 
-    if($Manager -and -not $ManagerObject)
+    if(-not $ManagerResult.IsValid)
     {
     
-        Write-Host "Manager '$Manager' not found." -ForegroundColor Red
+        Write-Host "Manager $Manager not found." -ForegroundColor Red
 
         Write-Log `
-            -Message "$SamAccountName - Invalid Manager" `
-            -Status "FAILED"
+            -Message "$SamAccountName - Invalid Manager : $Manager" `
+            -Status "WARNING"
 
         $SkippedCount++
 
-        continue
+        Write-Log `
+            -Message "$SamAccountName - Overall Provisioning Result: SKIPPED" `
+            -Status "WARNING"
+
+        Continue
             
 
     }
 
+    $ManagerObject = $ManagerResult.User
 
-    #Create new user
+     # Get temporary password securely
 
-    try{
+    $SecurePassword = Read-Host `
+           "Enter temporary password for $SamAccountName" `
+            -AsSecureString
+
+    #Creation New User
+    try
+    {
     
         New-CompanyADUser `
             -DisplayName $DisplayName `
@@ -509,21 +622,105 @@ foreach ($User in $Users)
             -OU $OU `
             -SecurePassword $SecurePassword
 
+            #Incrementing User Creation Count
+            $CreatedCount ++
 
-        #Add manager if exist
+            Write-Log `
+                -Message "$SamAccountName - User Creation - Successful" `
+                -Status "SUCCESS"
+    }
+    catch
+    {
+    
+        Write-Host ""
+        Write-Host "User Creation Failed." -ForegroundColor Red
+        Write-Host $_.Exception.Message
+
+        Write-Log `
+            -Message "$SamAccountName - User Creation Failed : $($_.Exception.Message)" `
+            -Status "FAILED"
+
+        Write-Log `
+            -Message "$SamAccountName - Overall Provisioning Result: FAILED" `
+            -Status "FAILED"
+
+        $FailedCount++
+
+        continue
+
+    }
+
+    #Setting Manager
+    try
+    {
+    
         Set-UserManager `
             -SamAccountName $SamAccountName `
             -ManagerObject $ManagerObject
 
-        #Verify User Creation
+        Write-Log `
+            -Message "$SamAccountName - Manager Assignment - Successful" `
+            -Status "SUCCESS"
+
+
+    }
+    catch
+    {
+    
+        Write-Host "Manager Assignment Failed for $SamAccountName." -ForegroundColor Red
+
+        Write-Log `
+            -Message "$SamAccountName - Manager Assignment - Failed : $($_.Exception.Message)" `
+            -Status "FAILED"
+
+        $ProvisioningResult = "PARTIAL"
+        
+
+    }
+
+    #Add User to Group
+    try
+    {
+    
+        $GroupResult = Add-UserToGroup `
+            -Group $Group `
+            -SamAccountName $SamAccountName
+
+        if(-not $GroupResult)
+        {
+        
+            $ProvisioningResult = "PARTIAL"
+            
+
+        }
+
+
+    }
+    catch
+    {
+    
+        Write-Host "User Group Addition Failed." -ForegroundColor Red
+
+        Write-Log `
+            -Message "$SamAccountName - Group Assignment - Failed : $($_.Exception.Message)" `
+            -Status "FAILED"
+
+        $ProvisioningResult = "PARTIAL"
+        
+
+    }
+   
+
+    #Verify User Created Successfully
+    try
+    {
+    
         $CreatedUser = Test-CreatedUser `
             -SamAccountName $SamAccountName
 
         if($CreatedUser)
         {
         
-           
-            
             Show-UserInformation `
                 -DisplayName $DisplayName `
                 -SamAccountName $SamAccountName `
@@ -534,36 +731,41 @@ foreach ($User in $Users)
                 -EmailAddress $EmailAddress
 
             Write-Log `
-                -Message "$SamAccountName created successfully" `
+                -Message "$SamAccountName - Verification - Successful" `
                 -Status "SUCCESS"
                 
-        
+
+        }
+        else
+        {
+            throw "User Verification failed. User $SamAccountName could not found after creation"
+
         }
 
-
-        #Calling Group Addition Function
-        Add-UserToGroup `
-            -Group $Group `
-            -SamAccountName $SamAccountName
-        
-        $CreatedCount++
-    
     }
     catch
     {
     
-        Write-Host ""
-        Write-Host "User Creation Failed." -ForegroundColor Red
-        Write-Host $_.Exception.Message
+        Write-Host "User verification failed." -ForegroundColor Red
 
         Write-Log `
-            -Message "$SamAccountName - $($_.Exception.Message)" `
+            -Message "$SamAccountName - Verification - Failed : $($_.Exception.Message)" `
             -Status "FAILED"
 
-        $FailedCount++
+        $ProvisioningResult = "PARTIAL"
 
     }
 
+
+    #Final Result
+    Write-Log `
+    -Message "$SamAccountName - Overall Provisioning Result: $ProvisioningResult" `
+    -Status $(if($ProvisioningResult -eq "COMPLETED"){"SUCCESS"}else{"WARNING"})
+
+    if($ProvisioningResult -eq "PARTIAL")
+    {
+        $PartialCount++
+    }
 
    
 }
@@ -572,6 +774,24 @@ Show-ProvisioningSummary `
     -CreatedCount $CreatedCount `
     -SkippedCount $SkippedCount `
     -FailedCount $FailedCount
+
+
+
+
+
+if($FailedCount -gt 0) {
+    $RunStatus = "FAILED"
+}
+elseif($SkippedCount -gt 0 -or $PartialCount -gt 0) {
+    $RunStatus = "WARNING"
+}
+else {
+    $RunStatus = "SUCCESS"
+}
+
+Write-Log `
+    -Message "Provisioning Run Summary | Created: $CreatedCount | Skipped: $SkippedCount | Failed: $FailedCount" `
+    -Status $RunStatus
 
 
 

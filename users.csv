@@ -1,6 +1,4 @@
-FirstName,LastName,SamAccountName,Department,Title,Password
-Hardik,Bapu,Hgy,IT,System Engineer,P@ssw0rd123
-Lihar,Kriten,LKT,HR,HR Executive,P@ssw0rd123
-Janu,Love,JL,Finance,System Engineer,P@ssw0rd123
-
-
+FirstName,LastName,SamAccountName,Department,Title,EmployeeID,Office,Manager
+Test,BatchOne,vd11,IT,IT Analyst,100135,Mumbai,MP
+Test,BatchTwo,vd12,HR,HR Executive,100136,Mumbai,MP
+Test,BatchThree,vd13,Finance,Finance Analyst,100137,Mumbai,MP
